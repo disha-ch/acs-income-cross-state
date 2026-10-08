@@ -39,7 +39,7 @@ def harmonize_features(data, year):
 
 
 def _load_state_records(year, state):
-    """Load features, labels and person IDs in the same filtered row order."""
+    """Build features and labels from one filtered dataframe in row order."""
     source = ACSDataSource(
         survey_year=str(year), horizon="1-Year", survey="person",
         root_dir=str(DATA_DIR),
@@ -47,20 +47,15 @@ def _load_state_records(year, state):
     data = source.get_data(states=[state], download=True)
     data = harmonize_features(data, int(year))
     filtered = adult_filter(data)
-    X, y, _ = ACSIncome.df_to_numpy(data)
-    if len(filtered) != len(y):
-        raise ValueError("Filtered records and labels are misaligned")
-    row_ids = np.array([
-        f"{year}:{state}:{serial}:{person}"
-        for serial, person in zip(filtered["SERIALNO"], filtered["SPORDER"])
-    ])
-    return X, y, row_ids
+    X = filtered[FEATURES].to_numpy()
+    X = np.nan_to_num(X)
+    y = ACSIncome.target_transform(filtered[ACSIncome.target]).to_numpy()
+    return X, y
 
 
 def load_state(year, state):
     """Load one state's ACSIncome features and labels."""
-    X, y, _ = _load_state_records(year, state)
-    return X, y
+    return _load_state_records(year, state)
 
 
 def prepare_split(year, states):
@@ -71,12 +66,11 @@ def prepare_split(year, states):
     state_ids = np.concatenate([
         np.full(len(batch[1]), state) for state, batch in zip(states, batches)
     ])
-    row_ids = np.concatenate([batch[2] for batch in batches])
-    validate_split(X, y, state_ids, row_ids)
-    return X, y, state_ids, row_ids
+    validate_split(X, y, state_ids)
+    return X, y, state_ids
 
 
-def validate_split(X, y, state_ids, row_ids=None):
+def validate_split(X, y, state_ids):
     """Check that split arrays have valid values and matching rows."""
     if X.ndim != 2 or X.shape[1] != len(FEATURES):
         raise ValueError("X must have 10 feature columns")
@@ -86,9 +80,6 @@ def validate_split(X, y, state_ids, row_ids=None):
         raise ValueError("y must contain binary labels")
     if not np.isfinite(X).all():
         raise ValueError("X contains missing or non-finite values")
-    if row_ids is not None:
-        if row_ids.ndim != 1 or len(row_ids) != len(y) or len(np.unique(row_ids)) != len(y):
-            raise ValueError("Person IDs must be unique and aligned with rows")
     return True
 
 
@@ -100,13 +91,15 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def save_split(X, y, state_ids, row_ids, path, year):
+def save_split(X, y, state_ids, path, year):
     """Save validated arrays and source/version provenance in an NPZ file."""
-    validate_split(X, y, state_ids, row_ids)
+    validate_split(X, y, state_ids)
     states = np.unique(state_ids).tolist()
     source_files = {}
     for state in states:
         source = DATA_DIR / str(year) / "1-Year" / f"psam_p{_STATE_CODES[state]}.csv"
+        if not source.is_file():
+            raise FileNotFoundError(f"ACS source file not found: {source}")
         source_files[state] = {"name": source.name, "sha256": _sha256(source)}
     metadata = {
         "source": "US Census ACS 1-Year PUMS person survey",
@@ -120,7 +113,7 @@ def save_split(X, y, state_ids, row_ids, path, year):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
-        path, X=X, y=y, state_ids=state_ids, row_ids=row_ids,
-        metadata=json.dumps(metadata),
+        path, X=X, y=y, state_ids=state_ids,
+        feature_names=np.asarray(FEATURES), metadata=json.dumps(metadata),
     )
     return path
