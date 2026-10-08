@@ -1,0 +1,22 @@
+{
+  "features": [
+    "AGEP",
+    "COW",
+    "SCHL",
+    "MAR",
+    "OCCP",
+    "POBP",
+    "RELP",
+    "WKHP",
+    "SEX",
+    "RAC1P"
+  ],
+  "label": "PINCP > 50000",
+  "filter": [
+    "AGEP > 16",
+    "PINCP > 100",
+    "WKHP > 0",
+    "PWGTP >= 1"
+  ],
+  "relationship_harmonization": "RELP/RELSHIPP v1"
+}

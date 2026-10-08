@@ -1,22 +1,43 @@
+
+# Python
 .venv/
+venv/
 __pycache__/
-.ipynb_checkpoints/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS and editors
 .DS_Store
+.vscode/
+.idea/
+
+# Secrets and local configuration
 .env
 .env.*
-exploration/
-environment/task_inputs/*.npz
-tests/hidden_data/
-artifacts/
-*.pt
-*.pth
-*.ckp
-environment/task_inputs/
-tests/hidden_data/
+!.env.example
+*.pem
+*.key
 
-# Exploratory data
-exploration/
+# Logs and temporary execution results
+*.log
+*.tmp
+workdir/
+jobs/
 
-# Python environment
-.venv/
-__pycache__/t
+# Trained models and generated outputs
+*.joblib
+*.pkl
+*.npy
+*.npz
+
+# Large or downloaded research datasets
+exploration/data/
+exploration/downloads/
+exploration/cache/
+exploration/.cache/
+**/.ipynb_checkpoints/
+
+# Keep exploration/ notebooks and scripts/ code tracked.
+# Packaged ACS inputs and verifier-only datasets remain local.

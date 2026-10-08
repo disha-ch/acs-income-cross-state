@@ -1,0 +1,11 @@
+feature,meaning,type
+AGEP,Age,numerical
+COW,Class of worker,nominal categorical
+SCHL,Educational attainment,ordinal categorical
+MAR,Marital status,nominal categorical
+OCCP,Occupation,nominal categorical
+POBP,Place of birth,nominal categorical
+RELP,Relationship to reference person,nominal categorical
+WKHP,Usual weekly work hours,numerical
+SEX,Sex,nominal categorical
+RAC1P,Race recode,nominal categorical

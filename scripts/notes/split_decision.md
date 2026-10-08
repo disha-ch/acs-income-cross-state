@@ -1,5 +1,5 @@
 Question: Which states will be used for training, validation, and hidden evaluation?
-Explanation: This is a provisional allocation for exploring geographic and temporal generalization. The EDA supports the data’s usability and shows differences in observed income-positive rates. It does not establish how difficult any state will be for a model.
+This is a provisional allocation for exploring geographic and temporal generalization. The EDA supports the data’s usability and shows differences in observed income-positive rates. It does not establish how difficult any state will be for a model.
 Which states?
 Training: CA, TX, and NY (2018). Validation: FL (2018). Hidden evaluation: MS, WV, NM, AR, LA, and MT (2018 and 2021).
 Why these training states?
