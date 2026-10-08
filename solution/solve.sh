@@ -34,9 +34,9 @@ fi
 
 # Resolve data path: Docker location first, then local task_inputs/ fallback.
 # EDIT: Change the filename to match your task's input data.
-DATA_PATH="${OTTER_DATA_PATH:-/app/data/input_data.npz}"
+DATA_PATH="${OTTER_DATA_PATH:-/app/data/train.npz}"
 if [[ ! -f "${DATA_PATH}" ]]; then
-  LOCAL="${TASK_DIR}/environment/task_inputs/input_data.npz"
+  LOCAL="${TASK_DIR}/environment/task_inputs/train.npz"
   if [[ -f "${LOCAL}" ]]; then
     DATA_PATH="${LOCAL}"
   fi
