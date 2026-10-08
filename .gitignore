@@ -10,4 +10,13 @@ tests/hidden_data/
 artifacts/
 *.pt
 *.pth
-*.ckpt
+*.ckp
+environment/task_inputs/
+tests/hidden_data/
+
+# Exploratory data
+exploration/
+
+# Python environment
+.venv/
+__pycache__/t

@@ -117,3 +117,49 @@ def save_split(X, y, state_ids, path, year):
         feature_names=np.asarray(FEATURES), metadata=json.dumps(metadata),
     )
     return path
+
+
+def main():
+    """Prepare the provisional train, validation, and hidden partitions."""
+    root = Path(__file__).resolve().parents[1]
+    agent_data = root / "environment" / "task_inputs"
+    hidden_data = root / "tests" / "hidden_data"
+    partitions = [
+        ("train", 2018, ["CA", "TX", "NY"], agent_data / "train.npz"),
+        ("val", 2018, ["FL"], agent_data / "val.npz"),
+        ("hidden_2018", 2018, ["MS", "WV", "NM", "AR", "LA", "MT"], hidden_data / "hidden_2018.npz"),
+        ("hidden_2021", 2021, ["MS", "WV", "NM", "AR", "LA", "MT"], hidden_data / "hidden_2021.npz"),
+    ]
+    train_states = set(partitions[0][2])
+    validation_states = set(partitions[1][2])
+    hidden_states = set(partitions[2][2])
+    if (train_states & validation_states or train_states & hidden_states
+            or validation_states & hidden_states):
+        raise ValueError("Training, validation, and hidden states must be disjoint")
+
+    for name, year, states, path in partitions:
+        X, y, state_ids = prepare_split(year, states)
+        validate_split(X, y, state_ids)
+        save_split(X, y, state_ids, path, year)
+        with np.load(path, allow_pickle=False) as archive:
+            if not (np.array_equal(archive["X"], X)
+                    and np.array_equal(archive["y"], y)
+                    and np.array_equal(archive["state_ids"], state_ids)):
+                raise ValueError(f"Saved arrays failed round-trip validation: {path}")
+        print(
+            f"{name}: {len(y):,} rows, {X.shape[1]} features, "
+            f"positive rate {y.mean():.4f}; saved {path}"
+        )
+
+    metadata = {
+        "features": FEATURES,
+        "label": "PINCP > 50000",
+        "filter": ["AGEP > 16", "PINCP > 100", "WKHP > 0", "PWGTP >= 1"],
+        "relationship_harmonization": "RELP/RELSHIPP v1",
+    }
+    agent_data.mkdir(parents=True, exist_ok=True)
+    (agent_data / "feature_metadata.json").write_text(json.dumps(metadata, indent=2))
+
+
+if __name__ == "__main__":
+    main()
