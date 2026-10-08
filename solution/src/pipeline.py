@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 import time
+import threading
 
 import joblib
 import numpy as np
@@ -344,13 +345,20 @@ def train_and_evaluate(
     """
     out = Path(output_dir) if output_dir else ARTIFACTS
     processed = out / "processed_data.npz"
+
     if not processed.is_file():
         load_and_preprocess(data_path, out, seed)
 
     with np.load(processed, allow_pickle=False) as data:
-        X_train, y_train = data["X_train"], data["y_train"]
-        X_val, y_val = data["X_val"], data["y_val"]
-        names = data["feature_names"].astype(str).tolist() if "feature_names" in data else FEATURES
+        X_train = data["X_train"]
+        y_train = data["y_train"]
+        X_val = data["X_val"]
+        y_val = data["y_val"]
+        names = (
+            data["feature_names"].astype(str).tolist()
+            if "feature_names" in data
+            else FEATURES
+        )
 
     raw_model = build_model(seed)
     calibrated_model = CalibratedClassifierCV(
@@ -363,6 +371,7 @@ def train_and_evaluate(
     stop = threading.Event()
     process_seen = threading.Event()
     watcher = None
+
     if DEVICE == "cuda":
         watcher = threading.Thread(
             target=_watch_gpu,
@@ -376,68 +385,91 @@ def train_and_evaluate(
         raw_model.fit(X_train, y_train)
         calibrated_model.fit(X_train, y_train)
     finally:
-        total_training_seconds = time.perf_counter() - start
+        training_seconds = time.perf_counter() - start
         if watcher is not None:
             stop.set()
             watcher.join()
 
-    raw_p = predict_proba(raw_model, X_val, names)
-    calibrated_p = predict_proba(calibrated_model, X_val, names)
+    raw_p = predict_proba(raw_model, X_val)
+    calibrated_p = predict_proba(calibrated_model, X_val)
+
+    raw_scores = _scores(y_val, raw_p)
+    calibrated_scores = _scores(y_val, calibrated_p)
+
+    if (
+        calibrated_scores["ece_top_label_10bin"]
+        < raw_scores["ece_top_label_10bin"]
+        and calibrated_scores["accuracy"] >= raw_scores["accuracy"]
+    ):
+        selected_model = calibrated_model
+        selected_p = calibrated_p
+        selected_scores = calibrated_scores
+        selected_name = "calibrated"
+    else:
+        selected_model = raw_model
+        selected_p = raw_p
+        selected_scores = raw_scores
+        selected_name = "raw"
+
     gpu = _check_gpu(
         raw_model,
         calibrated_model,
         process_seen=process_seen.is_set(),
     )
 
+    model_dir = MODELS if output_dir is None else out.parent / "models"
     model_paths = {
-        "raw": MODELS / "acs_income_raw.joblib",
-        "calibrated": MODELS / "acs_income_calibrated.joblib",
-        "selected": MODELS / "trained_model.joblib",
+        "raw": model_dir / "acs_income_raw.joblib",
+        "calibrated": model_dir / "acs_income_calibrated.joblib",
+        "selected": model_dir / "trained_model.joblib",
     }
-    probabilities = {"raw": raw_p, "calibrated": calibrated_p}
-    models = {"raw": raw_model, "calibrated": calibrated_model}
 
-    for name, model in models.items():
+    for name, model, expected_p in [
+        ("raw", raw_model, raw_p),
+        ("calibrated", calibrated_model, calibrated_p),
+        ("selected", selected_model, selected_p),
+    ]:
         save_model(model, model_paths[name])
-        restored = load_model(model_paths[name])
-        restored_p = predict_proba(restored, X_val, names)
-        np.testing.assert_allclose(restored_p, probabilities[name], rtol=0, atol=1e-7)
+        restored_model = load_model(model_paths[name])
+        restored_p = predict_proba(restored_model, X_val)
+        np.testing.assert_allclose(
+            expected_p, restored_p, rtol=0, atol=1e-7
+        )
 
-    selected_model = models[SELECTED_MODEL]
-    selected_p = probabilities[SELECTED_MODEL]
-    save_model(selected_model, model_paths["selected"])
-    restored_selected = load_model(model_paths["selected"])
-    restored_p = predict_proba(restored_selected, X_val, names)
-    np.testing.assert_allclose(restored_p, selected_p, rtol=0, atol=1e-7)
-
-    validation_scores = {
-        "raw": _scores(y_val, raw_p),
-        "calibrated": _scores(y_val, calibrated_p),
-    }
-
-    # Keep the standardized file. These values are explicitly validation-only.
     metrics = {
-        **_scores(y_val, selected_p),
+        "accuracy": selected_scores["accuracy"],
+        "auroc": selected_scores["auroc"],
+        "ece_top_label_10bin": selected_scores["ece_top_label_10bin"],
         "scope": "visible_validation",
-        "selected_model": SELECTED_MODEL,
     }
 
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    (ARTIFACTS / "validation_diagnostics.json").write_text(json.dumps({
-        "raw_and_calibrated_validation_scores": validation_scores,
-        "total_training_seconds_including_calibration": total_training_seconds,
-        "selected_model": SELECTED_MODEL,
-        "gpu": gpu,
-        "checkpoint_check": "all validation probabilities match after reload",
-    }, indent=2) + "\n")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    (out / "validation_diagnostics.json").write_text(
+        json.dumps(
+            {
+                "raw": raw_scores,
+                "calibrated": calibrated_scores,
+                "selected_model": selected_name,
+                "training_seconds": training_seconds,
+                "gpu": gpu,
+                "checkpoint_check": "validation probabilities match after reload",
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
     return {
         "metrics": metrics,
-        "validation_scores": validation_scores,
-        "training_seconds": total_training_seconds,
-        "gpu": gpu,
+        "validation_scores": {
+            "raw": raw_scores,
+            "calibrated": calibrated_scores,
+        },
+        "selected_model": selected_name,
         "selected_checkpoint": str(model_paths["selected"]),
+        "training_seconds": training_seconds,
+        "gpu": gpu,
     }
 
 
@@ -460,14 +492,18 @@ def run_full(
     out = Path(output_dir) if output_dir else ARTIFACTS
     data = load_and_preprocess(data_path, out, seed)
     results = train_and_evaluate(data_path, out, seed)
+    selected_name = results["selected_model"]
 
     claims = {
         "training_split": "Visible CA/TX/NY 2018 data",
         "validation_split": "Visible Florida 2018 data",
         "metrics_scope": "Validation only",
         "hidden_labels_loaded": False,
-        "selected_model": SELECTED_MODEL,
-        "selection_rule": "Raw model is the predeclared baseline",
+        "selected_model": selected_name,
+        "selection_rule": (
+            "Choose calibrated when validation top-label ECE is lower "
+            "and validation accuracy is at least as high as raw; otherwise choose raw."
+        ),
         "training_seconds_include_calibration": results["training_seconds"],
         "gpu_check": results["gpu"],
         "selected_checkpoint": results["selected_checkpoint"],
@@ -484,7 +520,9 @@ def run_full(
 Training rows: {data['train_rows']:,}
 Florida validation rows: {data['validation_rows']:,}
 
-The selected model is the raw model, the predeclared baseline.
+The selected model is the {selected_name} model. Selection used validation data only:
+calibrated was chosen when its top-label ECE was lower and its accuracy was at
+least as high as raw; otherwise raw was chosen.
 
 Raw validation AUROC: {raw['auroc']:.4f}
 Raw validation accuracy: {raw['accuracy']:.4f}

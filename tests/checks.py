@@ -29,16 +29,167 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 APP_DIR = Path(os.environ.get("OTTER_APP_DIR", "/app"))
+HIDDEN_DIR = Path(__file__).resolve().parent / "hidden_data"
+FEATURES = [
+    "AGEP", "COW", "SCHL", "MAR", "OCCP",
+    "POBP", "RELP", "WKHP", "SEX", "RAC1P",
+]
+
+
+def _load_hidden_data():
+    """Load and validate the verifier-only evaluation archives."""
+    yearly = {}
+    for year in (2018, 2021):
+        path = HIDDEN_DIR / f"hidden_{year}.npz"
+        if not path.is_file():
+            raise AssertionError(f"Missing hidden archive for {year}")
+
+        with np.load(path, allow_pickle=False) as data:
+            X = data["X"]
+            y = data["y"]
+            state_ids = data["state_ids"].astype(str)
+            names = data["feature_names"].astype(str).tolist()
+
+        if X.ndim != 2 or X.shape[1] != len(FEATURES):
+            raise AssertionError(f"Hidden {year} features have the wrong shape")
+        if names != FEATURES:
+            raise AssertionError(f"Hidden {year} feature order is incorrect")
+        if y.ndim != 1 or state_ids.ndim != 1:
+            raise AssertionError(f"Hidden {year} labels or states have wrong shape")
+        if len(X) == 0 or len(X) != len(y) or len(X) != len(state_ids):
+            raise AssertionError(f"Hidden {year} arrays are not row-aligned")
+        if not np.isin(y, [0, 1, False, True]).all():
+            raise AssertionError(f"Hidden {year} labels are not binary")
+        if not np.isfinite(X).all():
+            raise AssertionError(f"Hidden {year} features contain invalid values")
+
+        yearly[year] = (X, y.astype(np.int8), state_ids, names)
+
+    if set(yearly[2018][2].tolist()) != set(yearly[2021][2].tolist()):
+        raise AssertionError("Hidden years do not cover the same states")
+    if len(set(yearly[2018][2].tolist())) < 2:
+        raise AssertionError("Worst-state scoring requires multiple states")
+
+    return yearly
+
+
+def _top_label_ece(y, probabilities, bins=10):
+    """Calculate equal-width top-label ECE with confidence 1 in the last bin."""
+    y = np.asarray(y)
+    probabilities = np.asarray(probabilities, dtype=float)
+    predicted = (probabilities >= 0.5).astype(np.int8)
+    confidence = np.maximum(probabilities, 1.0 - probabilities)
+    correct = (predicted == y).astype(float)
+    bin_ids = np.minimum((confidence * bins).astype(int), bins - 1)
+
+    ece = 0.0
+    for bin_id in range(bins):
+        rows = bin_ids == bin_id
+        if rows.any():
+            ece += rows.mean() * abs(correct[rows].mean() - confidence[rows].mean())
+    return float(ece)
+
+
+def _hidden_metrics():
+    """Run the agent predictor without passing hidden labels or state IDs."""
+    yearly = _load_hidden_data()
+    model_path = app_path("models", "trained_model.joblib")
+    predict_path = app_path("predict.py")
+    if not model_path.is_file():
+        raise AssertionError(f"Missing selected checkpoint: {model_path}")
+    if not predict_path.is_file():
+        raise AssertionError(f"Missing inference program: {predict_path}")
+
+    probabilities_by_year = {}
+    with tempfile.TemporaryDirectory(prefix="acs_hidden_eval_") as temp_dir:
+        temp_dir = Path(temp_dir).resolve()
+        for year in (2018, 2021):
+            X, _, _, names = yearly[year]
+            input_path = temp_dir / f"prediction_{year}.npz"
+            output_path = temp_dir / f"predictions_{year}.npy"
+
+            np.savez_compressed(
+                input_path,
+                X=X,
+                feature_names=np.asarray(names),
+            )
+            with np.load(input_path, allow_pickle=False) as prediction_input:
+                if set(prediction_input.files) != {"X", "feature_names"}:
+                    raise AssertionError("Prediction input contains extra fields")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(predict_path.resolve()),
+                    "--model", str(model_path.resolve()),
+                    "--input", str(input_path),
+                    "--output", str(output_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                cwd=temp_dir,
+            )
+
+            if not output_path.is_file():
+                raise AssertionError(f"Predictor did not create {year} output")
+            probabilities = np.load(output_path, allow_pickle=False)
+            if probabilities.shape != (len(X),):
+                raise AssertionError(f"{year} predictions have the wrong shape")
+            if not np.isfinite(probabilities).all():
+                raise AssertionError(f"{year} predictions are non-finite")
+            if ((probabilities < 0) | (probabilities > 1)).any():
+                raise AssertionError(f"{year} predictions are outside [0, 1]")
+            probabilities_by_year[year] = probabilities
+
+    yearly_scores = {}
+    for year in (2018, 2021):
+        _, y, state_ids, _ = yearly[year]
+        probabilities = probabilities_by_year[year]
+        predicted = (probabilities >= 0.5).astype(np.int8)
+        state_accuracies = [
+            float((predicted[state_ids == state] == y[state_ids == state]).mean())
+            for state in np.unique(state_ids)
+        ]
+        yearly_scores[year] = {
+            "accuracy": float((predicted == y).mean()),
+            "worst_state_accuracy": min(state_accuracies),
+            "ece_top_label_10bin": _top_label_ece(y, probabilities),
+        }
+
+    X = np.concatenate([yearly[year][0] for year in (2018, 2021)])
+    y = np.concatenate([yearly[year][1] for year in (2018, 2021)])
+    state_ids = np.concatenate([yearly[year][2] for year in (2018, 2021)])
+    probabilities = np.concatenate(
+        [probabilities_by_year[year] for year in (2018, 2021)]
+    )
+    predicted = (probabilities >= 0.5).astype(np.int8)
+    state_accuracies = [
+        float((predicted[state_ids == state] == y[state_ids == state]).mean())
+        for state in np.unique(state_ids)
+    ]
+
+    metrics = {
+        "hidden_accuracy": float((predicted == y).mean()),
+        "worst_state_accuracy": min(state_accuracies),
+        "hidden_ece_top_label_10bin": _top_label_ece(y, probabilities),
+    }
+    return metrics, yearly_scores
 
 
 def app_path(*parts: str) -> Path:
@@ -81,34 +232,18 @@ def require_keys(obj: dict, keys: set[str], label: str) -> None:
 
 def check_data_deliverables() -> str:
     """Check that required data-stage files exist."""
-    # EDIT: Delete this raise once you've implemented the check. Every
-    # placeholder fails loudly so an unedited check can never pass silently.
-    raise NotImplementedError("EDIT checks.py: implement check_data_deliverables")
-    for path in [
-        # EDIT: List the files instruction.md tells the agent to produce.
-        # app_path("src/data_loader.py"),
-        # app_path("artifacts/dataset_manifest.json"),
-        # app_path("artifacts/processed_data.npz"),
-    ]:
+    for path in (app_path("train.py"), app_path("predict.py")):
         assert path.exists(), f"Missing: {path}"
-    return "data deliverables exist"
+    return "Training and inference programs exist"
 
 
 def check_data_schema() -> str:
     """Validate structure of data artifacts."""
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_data_schema")
-    # EDIT: Load the agent's output and check structure/values.
-    # manifest = load_json(app_path("artifacts/dataset_manifest.json"))
-    # require_keys(
-    #     manifest,
-    #     {"source", "splits", "n_samples", "preprocessing_steps"},
-    #     "dataset_manifest.json",
-    # )
-    # assert sum(manifest["splits"].values()) == manifest["n_samples"], (
-    #     f"splits must sum to n_samples"
-    # )
-    return "data schema valid"
+    metadata = load_json(app_path("data", "feature_metadata.json"))
+    assert metadata.get("features") == FEATURES, "Feature metadata order is incorrect"
+    yearly = _load_hidden_data()
+    assert yearly[2018][3] == yearly[2021][3] == FEATURES
+    return "Feature names and order match the required contract"
 
 
 # ---------------------------------------------------------------------------
@@ -119,29 +254,27 @@ def check_data_schema() -> str:
 
 def check_model_deliverables() -> str:
     """Check that required model-stage files exist."""
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_model_deliverables")
-    for path in [
-        # EDIT: List the model-stage files.
-        # app_path("artifacts/metrics.json"),
-        # app_path("artifacts/predictions.csv"),
-        # app_path("models/trained_model.pkl"),
-    ]:
-        assert path.exists(), f"Missing: {path}"
-    return "model deliverables exist"
+    path = app_path("models", "trained_model.joblib")
+    assert path.is_file(), f"Missing selected model: {path}"
+    return "Selected model checkpoint exists"
 
 
 def check_metrics_schema() -> str:
     """Validate metrics structure and value ranges."""
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_metrics_schema")
-    # EDIT: Load and validate the agent's metrics.
-    # metrics = load_json(app_path("artifacts/metrics.json"))
-    # require_keys(metrics, {"auroc", "accuracy", "f1"}, "metrics.json")
-    # assert 0.0 <= metrics["auroc"] <= 1.0, (
-    #     f"auroc must be in [0,1]; got {metrics['auroc']}"
-    # )
-    return "metrics schema valid"
+    metrics = load_json(app_path("artifacts", "metrics.json"))
+    expected = {"accuracy", "auroc", "ece_top_label_10bin", "scope"}
+    assert set(metrics) == expected, f"metrics.json keys must be {sorted(expected)}"
+    assert metrics["scope"] == "visible_validation", "Metrics scope is incorrect"
+
+    for key in ("accuracy", "auroc", "ece_top_label_10bin"):
+        value = metrics[key]
+        assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+            f"{key} must be a number"
+        )
+        assert np.isfinite(value) and 0.0 <= value <= 1.0, (
+            f"{key} must be finite and in [0, 1]"
+        )
+    return "Visible validation metric schema is valid"
 
 
 def check_metrics_thresholds() -> str:
@@ -156,14 +289,10 @@ def check_metrics_thresholds() -> str:
     below the human bar. Example: if human AUROC is 0.85 and pass_criteria
     is 0.80, set this sanity check to 0.55 (just above random).
     """
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_metrics_thresholds")
-    # EDIT: Set sanity-check baselines well below human performance.
-    # metrics = load_json(app_path("artifacts/metrics.json"))
-    # assert metrics["auroc"] >= 0.55, (
-    #     f"AUROC below random chance; got {metrics['auroc']}"
-    # )
-    return "metrics above baseline"
+    metrics = load_json(app_path("artifacts", "metrics.json"))
+    assert metrics["auroc"] > 0.5, "Validation AUROC must beat random ranking"
+    assert metrics["accuracy"] > 0.5, "Validation accuracy is below a basic baseline"
+    return "Visible validation metrics pass basic sanity checks"
 
 
 # ---------------------------------------------------------------------------
@@ -178,30 +307,28 @@ def check_metrics_thresholds() -> str:
 
 def check_final_deliverables() -> str:
     """Check that final output files exist."""
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_final_deliverables")
-    for path in [
-        # EDIT: List final deliverables.
-        # app_path("artifacts/final_results.json"),
-        # app_path("reports/report.md"),
-    ]:
+    for path in (
+        app_path("artifacts", "claims.json"),
+        app_path("reports", "report.md"),
+    ):
         assert path.exists(), f"Missing: {path}"
-    return "final deliverables exist"
+    return "Claims and report exist"
 
 
 def check_report_content() -> str:
     """Verify report discusses required topics with sufficient depth."""
-    # EDIT: Delete this raise once you've implemented the check.
-    raise NotImplementedError("EDIT checks.py: implement check_report_content")
-    # EDIT: Check the agent's report.
-    # report = app_path("reports/report.md").read_text().lower()
-    # required = ["baseline", "method", "results", "limitations"]
-    # missing = [t for t in required if t not in report]
-    # assert not missing, f"Report missing required terms: {missing}"
-    # assert len(report.split()) >= 200, (
-    #     f"Report must be >= 200 words; got {len(report.split())}"
-    # )
-    return "report content valid"
+    report = app_path("reports", "report.md").read_text().lower()
+    assert len(report.split()) >= 80, "Report is too short to explain the work"
+    assert any(word in report for word in ("xgboost", "model", "training")), (
+        "Report should describe the method"
+    )
+    assert any(word in report for word in ("validation", "accuracy", "auroc")), (
+        "Report should discuss visible results"
+    )
+    assert any(word in report for word in ("limitation", "hidden", "shift")), (
+        "Report should discuss limitations"
+    )
+    return "Report covers method, visible results, and limitations"
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +365,7 @@ def _criterion(id: str, fn, milestone_id: str = "final") -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def evaluate(context: dict) -> dict:
-    """Run all checks and return criteria + metrics.
+    """Run all checks and return criteria plus verifier-computed hidden metrics.
 
     The harness computes the scores from these criteria:
       rubric_score.py: per-milestone scores and the overall Rubric Score
@@ -250,13 +377,6 @@ def evaluate(context: dict) -> dict:
     Primary metric thresholds are evaluated by pass_fail.py automatically.
     Return {"criteria": [...], "metrics": {...}}.
     """
-    # EDIT: Read the agent's metrics from its output artifacts.
-    # The keys here must match all the keys in human_scores.json pass_criteria.
-    # Example: if pass_criteria has "auroc", return {"auroc": <value>}.
-    #
-    # metrics = load_json(app_path("artifacts/metrics.json"))
-    metrics = {}  # EDIT: Replace with actual metric values.
-
     criteria = [
         # --- Milestone 1: [YOUR FIRST MILESTONE] ---
         _criterion("data_deliverables",
@@ -286,5 +406,26 @@ def evaluate(context: dict) -> dict:
                    milestone_id="deliverables-and-report"),
 
     ]
+
+    # Keep individual checks available even if hidden inference fails.
+    model_check = next(item for item in criteria if item["id"] == "model_deliverables")
+    try:
+        metrics, yearly_scores = _hidden_metrics()
+        model_check["detail"] += (
+            "; 2018: "
+            f"accuracy={yearly_scores[2018]['accuracy']:.4f}, "
+            f"worst-state={yearly_scores[2018]['worst_state_accuracy']:.4f}, "
+            f"ECE={yearly_scores[2018]['ece_top_label_10bin']:.4f}; "
+            "2021: "
+            f"accuracy={yearly_scores[2021]['accuracy']:.4f}, "
+            f"worst-state={yearly_scores[2021]['worst_state_accuracy']:.4f}, "
+            f"ECE={yearly_scores[2021]['ece_top_label_10bin']:.4f}"
+        )
+    except Exception as exc:
+        metrics = {}
+        model_check["passed"] = False
+        model_check["detail"] = (
+            f"Hidden inference failed: {type(exc).__name__}: {exc}"
+        )
 
     return {"criteria": criteria, "metrics": metrics}

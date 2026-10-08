@@ -32,9 +32,13 @@ if [[ -f "${SCRIPT_DIR}/run.py" ]]; then
   cp "${SCRIPT_DIR}/run.py" "${APP_DIR}/run.py"
 fi
 
-# Added the inference entry point eith run.py.
+# Added the inference entry point eith run.p, predict.py and train.py
 if [[ -f "${SCRIPT_DIR}/predict.py" ]]; then
   cp "${SCRIPT_DIR}/predict.py" "${APP_DIR}/predict.py"
+fi
+
+if [[ -f "${SCRIPT_DIR}/train.py" ]]; then
+  cp "${SCRIPT_DIR}/train.py" "${APP_DIR}/train.py"
 fi
 
 # Resolve data path: Docker location first, then local task_inputs/ fallback.
