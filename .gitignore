@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+.env
+.env.*
+exploration/
+environment/task_inputs/*.npz
+tests/hidden_data/
+artifacts/
+*.pt
+*.pth
+*.ckpt
