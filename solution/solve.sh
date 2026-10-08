@@ -32,6 +32,11 @@ if [[ -f "${SCRIPT_DIR}/run.py" ]]; then
   cp "${SCRIPT_DIR}/run.py" "${APP_DIR}/run.py"
 fi
 
+# Added the inference entry point eith run.py.
+if [[ -f "${SCRIPT_DIR}/predict.py" ]]; then
+  cp "${SCRIPT_DIR}/predict.py" "${APP_DIR}/predict.py"
+fi
+
 # Resolve data path: Docker location first, then local task_inputs/ fallback.
 # EDIT: Change the filename to match your task's input data.
 DATA_PATH="${OTTER_DATA_PATH:-/app/data/train.npz}"

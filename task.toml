@@ -3,16 +3,16 @@ runtime_limits = 14400
 
 
 [task]
-name = "otter/task-name-with-no-spaces"
-description = ""
+name = "otter/acs-income-cross-state-shift"
+description = "Train an ACSIncome classifier and evaluate its performance under geographic and post-2020 temporal distribution shift, including worst-state accuracy and calibration."
 
 [metadata]
-domain = ""
-subdomain = ""
-tags = ["", "", ""]
-source_dataset = ""
-source_url = ""
-source_reference_id = ""
+domain = "machine-learning"
+subdomain = "tabular-classification"
+tags = ["acs-income", "distribution-shift", "calibration"]
+source_dataset = "ACSIncome (Folktables; US Census ACS PUMS)"
+source_url = "https://github.com/socialfoundations/folktables"
+source_reference_id = "arxiv:2108.04884"
 source_license = ""
 
 [environment]
@@ -25,9 +25,9 @@ storage_mb = 81920
 # 0 for CPU-only tasks. Set to 1 for GPU tasks (single-GPU max — tasks are
 # validated in single-container, single-GPU sandboxes) and switch
 # environment/Dockerfile to a CUDA base image (see comments there).
-gpus = 0
-gpu_types = []
-allow_internet = true
+gpus = 1
+gpu_types = ["L4", "A100"]
+allow_internet = false
 
 [agent]
 timeout_sec = 14400.0
